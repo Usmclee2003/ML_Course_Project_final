@@ -1,0 +1,195 @@
+---
+title: "ML_Course_Project"
+author: "Lee Pena"
+date: "February 27, 2018"
+output: html_document; md; rmd
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, warning=FALSE, message = FALSE)
+```
+
+#Machine Learnining Project
+
+Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+```{r}
+#Load all the packages we will need for project
+library(caret)
+library(randomForest)
+library(corrplot)
+library(parallel)
+library(doParallel)
+library(nortest)
+```
+
+## Data 
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+
+bring in data and setup up for parallel processing:
+
+```{r, results='hide'}
+
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "ML_project_training.csv")
+
+training <- read.csv("ML_project_training.csv")
+
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "ML_project_test.csv")
+
+test <-read.csv("ML_project_test.csv")
+
+head(training)
+summary(training)
+```
+
+# Data Preprocess
+
+Remove first 7 columns for training and test as X appears to just be an index and other columns are just ID's.
+Appears to be a large number of na's as well
+```{r}
+training <- training[-c(1:7)]
+
+test <- test[-c(1:7)]
+
+```
+
+Checking to see how many complete rows that are in the dataset
+
+```{r} 
+training2 <-training[complete.cases(training), ]
+dim(training2)
+```
+looks like we reduce to very few columns with complete cases so we will need to go another route
+
+replace empty values with NA on training and test set:
+```{r}
+training[training==""] = NA
+test[test==""] = NA
+```
+
+Look at how many NA's are in each column
+```{r}
+colSums(is.na(training))
+colSums(is.na(test))
+```
+
+ looks like rows that have Na's have majority Na's that sum to 19216 across the board.
+ removing columns that have Na's tha sum to 19216 in training set
+ doing the same for the testing set that has 20 NA per column across the board
+```{r}  
+training2 <- training[lapply( training, function(x) sum(is.na(x))) == !19216 ]
+
+test2 <- test[lapply( test, function(x) sum(is.na(x))) == !20 ]
+dim(training2)
+dim(test2)
+```
+
+#Slice Data
+Split training set into training and validation set
+```{r}
+inBuild <- createDataPartition(y=training2$classe,
+                               p=0.8, list=FALSE)
+validation <- training2[-inBuild,];
+training3 <- training2[inBuild,]
+```
+
+#Model Building
+
+Near Zero Variance variable identification
+```{r}
+
+nsv <- nearZeroVar(training3, saveMetrics = TRUE)
+nsv
+```
+no zero variance variables
+
+
+Check for normality
+```{r}
+vars <- names(training3) %in% "classe"
+training_temp <- training3[!vars] # remove factor variables as they cannot be used in Anderson Darling normality test
+
+library(nortest)
+lshap <- lapply(training_temp, ad.test) # apply normality test to all columns
+lres <- sapply(lshap, `[`, c("statistic","p.value"))  # extract the statistic and p value data
+transposed_test_results<- t(lres)  # transpose the data to see it in a nice data frame to see if any variable is not normal
+transposed_test_results
+```
+Looks like all variables are normally distributed according to the P values
+
+
+Looking for correlated variables
+
+```{r,}
+M <- abs(cor(training_temp))#calculate the correlation between all those columns. The correlation between all predictor variables. And take its absolute value.
+
+diag(M) <- 0                   #set the diag to zero as it is variable compared to itself
+which(M>0.9, arr.ind = T)      #setting correlation threshold to 90 %
+
+corrplot(cor(training_temp), order = "hclust")
+```
+
+
+```{r, results="hide"}
+names(training_temp)[c(4,1)]           # get the names of columns that are correlated
+#plot(training_temp[,4], training_temp[,1])
+
+names(training_temp)[c(9,1)]           # get the names of columns that are correlated
+#plot(training_temp[,9], training_temp[,1])
+
+names(training_temp)[c(8,2)]           # get the names of columns that are correlated
+#plot(training_temp[,8], training_temp[,2])
+
+names(training_temp)[c(46,33)]           # get the names of columns that are correlated
+#plot(training_temp[,46], training_temp[,33])
+```
+
+#Build Model
+
+
+since we have correlated variables will use random forest as it handles correlated values better than linear regression.  Using Cross Validation in the random forest model build.  Using 5 kfold 
+```{r}
+
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+fit <- train(classe~., data = training3, method="rf",trControl =fitControl)
+
+varImp(fit) 
+
+plot(fit)
+
+fit
+fit$resample
+confusionMatrix.train(fit)
+
+
+```
+
+#Test Model on validation set
+```{r}
+predict_rf <- predict(fit,validation)
+confusionMatrix(predict_rf, validation$classe)
+# predict values on the test set
+predict_rf <- predict(fit,test2)
+
+```
+The out of sample error is very small given the information above .0074
+
+
+#Conclusion
+The Random Forest method from the caret package automates the process of fitting multiple versions of a given model by varying its parameters and/or folds within a resampling / cross-validation process.  This has lead to a training accuracy of .9926 and a out of sample validation accuracy of .9916
+
